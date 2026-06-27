@@ -291,6 +291,7 @@ function startRec() {
   setRecordingUI();
   startEQ();
   try { recog.start(); } catch {}
+  startAudioCapture(); // 녹음 시작과 동시에 오디오 자동 캡처
 }
 
 function stopRec() {
@@ -335,39 +336,56 @@ function setLang(lang, btn) {
 }
 
 // ─────────────────────────────────────────
-// 녹음 저장: 버튼 클릭 시에만 getUserMedia
-// - 녹음 중: MediaRecorder 시작 → 중지 시 자동 저장
-// - 녹음 완료 후: blob 있으면 바로 다운로드
+// 오디오 자동 캡처: 녹음 시작과 동시에 getUserMedia + MediaRecorder
+// - 중지 시 onstop에서 blob 생성 (자동 다운로드는 하지 않음)
+// - 권한 거부/미지원 시에는 전사만 진행
 // ─────────────────────────────────────────
-async function saveAudio() {
-  if (audioBlob) { _downloadAudio(); return; }
+async function startAudioCapture() {
+  if (mediaRecorder) return; // 이미 캡처 중 (언어 변경 등으로 재시작된 경우)
+  audioChunks = [];
+  audioBlob   = null;
+  discarding  = false;
 
-  if (!recording) { showToast('녹음을 먼저 진행해 주세요'); return; }
-  if (mediaRecorder) { showToast('이미 녹음 파일을 캡처 중이에요'); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+    return; // 미지원 브라우저 → 전사만
+  }
 
+  let stream;
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch {
-    showErr('녹음 저장을 위해 마이크 권한이 필요해요.');
+    showToast('마이크 녹음 캡처를 시작할 수 없어 전사만 진행해요');
     return;
   }
 
-  audioChunks = [];
-  discarding  = false;
-  mediaRecorder = new MediaRecorder(micStream);
+  // getUserMedia 대기 중 사용자가 이미 중지했다면 스트림 정리 후 종료
+  if (!recording) { stream.getTracks().forEach(t => t.stop()); return; }
+
+  micStream = stream;
+  try {
+    mediaRecorder = new MediaRecorder(micStream);
+  } catch {
+    releaseMic();
+    return;
+  }
   mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
   mediaRecorder.onstop = () => {
     if (discarding) { audioChunks = []; releaseMic(); return; } // clearAll 중이면 무시
     if (audioChunks.length > 0) {
       audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-      _downloadAudio();
     }
     releaseMic();
-    document.getElementById('saveAudioBtn').disabled = !!audioBlob ? false : true;
+    document.getElementById('saveAudioBtn').disabled = !audioBlob;
     updateArchiveBtn();
   };
   mediaRecorder.start(1000);
-  showToast('녹음 캡처 중 — 중지 버튼을 누르면 저장돼요');
+}
+
+// 녹음 저장: 자동 캡처된 blob을 다운로드
+function saveAudio() {
+  if (audioBlob) { _downloadAudio(); return; }
+  if (recording)  { showToast('녹음 종료 후 저장할 수 있어요'); return; }
+  showToast('녹음을 먼저 진행해 주세요');
 }
 
 function _downloadAudio() {
@@ -393,8 +411,8 @@ function setRecordingUI() {
   document.getElementById('statusText').textContent = '녹음 중...';
   document.getElementById('errorMsg').style.display = 'none';
   document.getElementById('micIcon').innerHTML = '<rect x="6" y="6" width="12" height="12" rx="2"/>';
-  // 녹음 저장 버튼: 녹음 중에만 활성 (MediaRecorder 시작 전 안내용)
-  document.getElementById('saveAudioBtn').disabled = false;
+  // 녹음 저장 버튼: 녹음 중에는 비활성 (blob은 중지 후 생성됨)
+  document.getElementById('saveAudioBtn').disabled = true;
 }
 
 function setStoppedUI() {
