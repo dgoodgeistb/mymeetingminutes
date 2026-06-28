@@ -142,9 +142,13 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
       <button class="btn btn-ghost" id="saveTxtBtn" onclick="saveText()" disabled>📄 텍스트 저장</button>
       <button class="btn btn-ghost" id="saveAudioBtn" onclick="saveAudio()" disabled>🎵 녹음 저장</button>
       <button class="btn btn-ghost" id="archiveBtn" onclick="archiveSession()" disabled>🗄️ 보관함에 저장</button>
+      <button class="btn btn-ghost" id="loadFileBtn" onclick="document.getElementById('fileInput').click()">📂 불러오기</button>
+      <button class="btn btn-ghost" id="playBtn" onclick="togglePlay()" disabled>▶️ 재생</button>
       <div class="divider"></div>
       <button class="btn btn-ghost" onclick="clearAll()">초기화</button>
     </div>
+    <input type="file" id="fileInput" accept="audio/*,text/plain,.txt" style="display:none" onchange="handleFileLoad(event)" />
+    <audio id="player" style="display:none"></audio>
   </div>
 
   <div class="card" id="summaryCard" style="display:none;">
@@ -376,6 +380,7 @@ async function startAudioCapture() {
     }
     releaseMic();
     document.getElementById('saveAudioBtn').disabled = !audioBlob;
+    setAudioForPlayback(audioBlob);   // 방금 녹음한 오디오 재생 가능
     updateArchiveBtn();
   };
   mediaRecorder.start(1000);
@@ -386,6 +391,76 @@ function saveAudio() {
   if (audioBlob) { _downloadAudio(); return; }
   if (recording)  { showToast('녹음 종료 후 저장할 수 있어요'); return; }
   showToast('녹음을 먼저 진행해 주세요');
+}
+
+// ─────────────────────────────────────────
+// 파일 불러오기 (로컬에 저장한 전사 .txt / 녹음 오디오) + 재생
+// ─────────────────────────────────────────
+let playerUrl = null;
+
+function handleFileLoad(e){
+  const file = e.target.files && e.target.files[0];
+  e.target.value = ''; // 같은 파일을 다시 선택할 수 있도록 초기화
+  if (!file) return;
+  if (recording) { showToast('녹음 중에는 불러올 수 없어요'); return; }
+
+  const isAudio = file.type.startsWith('audio/') || /\.(webm|ogg|mp4|m4a|mp3|wav|aac|flac)$/i.test(file.name);
+  const isText  = file.type.startsWith('text/')  || /\.txt$/i.test(file.name);
+
+  if (isAudio) {
+    audioBlob   = file;
+    audioChunks = [];
+    setAudioForPlayback(file);                                   // 재생 버튼 활성화
+    document.getElementById('saveAudioBtn').disabled = false;
+    document.getElementById('statusText').textContent = '녹음 불러옴';
+    updateArchiveBtn();
+    showToast('녹음 파일을 불러왔어요 — ▶️ 재생을 눌러보세요');
+  } else if (isText) {
+    const reader = new FileReader();
+    reader.onload  = () => {
+      finalTx = String(reader.result || '').trim() + ' ';
+      renderTx('');
+      document.getElementById('statusText').textContent = '전사 불러옴';
+      showToast('전사 파일을 불러왔어요');
+    };
+    reader.onerror = () => showToast('파일을 읽을 수 없어요');
+    reader.readAsText(file);
+  } else {
+    showToast('지원하지 않는 파일 형식이에요 (.txt 또는 오디오 파일)');
+  }
+}
+
+// 재생용 오디오 소스 설정 + 재생 버튼 활성/비활성
+function setAudioForPlayback(blob){
+  const player  = document.getElementById('player');
+  const playBtn = document.getElementById('playBtn');
+  try { player.pause(); } catch {}
+  if (playerUrl) { try { URL.revokeObjectURL(playerUrl); } catch {} playerUrl = null; }
+  if (blob) {
+    playerUrl  = URL.createObjectURL(blob);
+    player.src = playerUrl;
+    playBtn.disabled = false;
+  } else {
+    player.removeAttribute('src');
+    try { player.load(); } catch {}
+    playBtn.disabled = true;
+  }
+  playBtn.textContent = '▶️ 재생';
+}
+
+// 재생 / 일시정지 토글
+function togglePlay(){
+  const player  = document.getElementById('player');
+  const playBtn = document.getElementById('playBtn');
+  if (!player.getAttribute('src')) { showToast('재생할 녹음이 없어요'); return; }
+  player.onended = () => { playBtn.textContent = '▶️ 재생'; };
+  if (player.paused) {
+    player.play().then(() => { playBtn.textContent = '⏸️ 일시정지'; })
+                 .catch(() => showToast('재생할 수 없어요'));
+  } else {
+    player.pause();
+    playBtn.textContent = '▶️ 재생';
+  }
 }
 
 function _downloadAudio() {
@@ -413,6 +488,7 @@ function setRecordingUI() {
   document.getElementById('micIcon').innerHTML = '<rect x="6" y="6" width="12" height="12" rx="2"/>';
   // 녹음 저장 버튼: 녹음 중에는 비활성 (blob은 중지 후 생성됨)
   document.getElementById('saveAudioBtn').disabled = true;
+  setAudioForPlayback(null); // 새 녹음 시작 → 이전 재생 소스 정리
 }
 
 function setStoppedUI() {
@@ -577,6 +653,7 @@ function clearAll() {
   document.getElementById('saveTxtBtn').disabled = true;
   document.getElementById('summarizeBtn').disabled = true;
   document.getElementById('archiveBtn').disabled = true;
+  setAudioForPlayback(null); // 재생 소스/버튼 초기화
   document.getElementById('errorMsg').style.display = 'none';
   document.getElementById('wc').textContent = '';
 }
@@ -842,6 +919,7 @@ function loadHistorySession(rec){
   audioChunks = [];
   renderTx('');
   document.getElementById('saveAudioBtn').disabled = !audioBlob;
+  setAudioForPlayback(audioBlob); // 녹음 포함 세션이면 재생 버튼 활성화
   document.getElementById('statusText').textContent = finalTx.trim() ? '불러옴' : '녹음 시작';
   document.getElementById('summaryCard').style.display = 'none';
   document.getElementById('summaryBox').textContent = '';
