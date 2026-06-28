@@ -52,11 +52,22 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
 .divider{width:1px;height:16px;background:var(--border);margin:0 2px;}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#18181b;color:white;padding:8px 18px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .3s;white-space:nowrap;}
 .toast.show{opacity:1;}
-.topbar{display:flex;align-items:center;margin-bottom:14px;}
+.topbar{display:flex;align-items:center;gap:8px;margin-bottom:14px;}
 .icon-btn{width:38px;height:38px;border-radius:10px;border:1.5px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;}
 .icon-btn:hover{border-color:var(--primary);color:var(--primary);background:#eff6ff;}
 .back-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
 .save-row{display:flex;justify-content:flex-end;margin-top:14px;}
+.history-empty{font-size:14px;color:var(--muted);font-style:italic;text-align:center;padding:20px 0;}
+.hist-item{border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-bottom:10px;background:var(--bg);}
+.hist-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px;}
+.hist-date{font-size:13px;font-weight:600;color:var(--text);}
+.hist-meta{font-size:11px;color:var(--muted);margin-top:2px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+.hist-tag{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:10px;background:#eff6ff;color:var(--primary);font-weight:600;}
+.hist-preview{font-size:13px;color:var(--muted);line-height:1.6;max-height:60px;overflow:hidden;margin-bottom:10px;white-space:pre-wrap;word-break:break-word;}
+.hist-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+.hist-audio{width:100%;height:34px;margin-bottom:10px;}
+.btn-danger-ghost{background:transparent;border:1.5px solid var(--border);color:var(--danger);}
+.btn-danger-ghost:hover{border-color:var(--danger);background:#fef2f2;}
 </style>
 </head>
 <body>
@@ -66,6 +77,14 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"/>
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+    <button class="icon-btn" id="historyBtn" onclick="openHistory()" title="보관함" aria-label="보관함">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 3v5h5"/>
+        <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/>
+        <line x1="12" y1="7" x2="12" y2="12"/>
+        <line x1="12" y1="12" x2="15.5" y2="14"/>
       </svg>
     </button>
   </div>
@@ -122,9 +141,14 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
       <div class="divider"></div>
       <button class="btn btn-ghost" id="saveTxtBtn" onclick="saveText()" disabled>📄 텍스트 저장</button>
       <button class="btn btn-ghost" id="saveAudioBtn" onclick="saveAudio()" disabled>🎵 녹음 저장</button>
+      <button class="btn btn-ghost" id="archiveBtn" onclick="archiveSession()" disabled>🗄️ 보관함에 저장</button>
+      <button class="btn btn-ghost" id="loadFileBtn" onclick="document.getElementById('fileInput').click()">📂 불러오기</button>
+      <button class="btn btn-ghost" id="playBtn" onclick="togglePlay()" disabled>▶️ 재생</button>
       <div class="divider"></div>
       <button class="btn btn-ghost" onclick="clearAll()">초기화</button>
     </div>
+    <input type="file" id="fileInput" accept="audio/*,text/plain,.txt" style="display:none" onchange="handleFileLoad(event)" />
+    <audio id="player" style="display:none"></audio>
   </div>
 
   <div class="card" id="summaryCard" style="display:none;">
@@ -169,6 +193,37 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
         저장
       </button>
     </div>
+  </div>
+</div>
+
+<div class="container" id="historyView" style="display:none;">
+  <div class="back-row">
+    <button class="icon-btn" onclick="closeHistory()" title="뒤로" aria-label="뒤로">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="19" y1="12" x2="5" y2="12"/>
+        <polyline points="12 19 5 12 12 5"/>
+      </svg>
+    </button>
+  </div>
+  <header>
+    <h1>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 3v5h5"/>
+        <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/>
+        <line x1="12" y1="7" x2="12" y2="12"/>
+        <line x1="12" y1="12" x2="15.5" y2="14"/>
+      </svg>
+      보관함
+    </h1>
+    <p class="subtitle">저장한 전사·녹음 내역을 불러오고 재생하세요</p>
+  </header>
+
+  <div class="card">
+    <div class="card-title">
+      <span>저장된 회의 내역</span>
+      <span class="wc" id="histCount"></span>
+    </div>
+    <div id="historyList"></div>
   </div>
 </div>
 
@@ -240,6 +295,7 @@ function startRec() {
   setRecordingUI();
   startEQ();
   try { recog.start(); } catch {}
+  startAudioCapture(); // 녹음 시작과 동시에 오디오 자동 캡처
 }
 
 function stopRec() {
@@ -284,38 +340,127 @@ function setLang(lang, btn) {
 }
 
 // ─────────────────────────────────────────
-// 녹음 저장: 버튼 클릭 시에만 getUserMedia
-// - 녹음 중: MediaRecorder 시작 → 중지 시 자동 저장
-// - 녹음 완료 후: blob 있으면 바로 다운로드
+// 오디오 자동 캡처: 녹음 시작과 동시에 getUserMedia + MediaRecorder
+// - 중지 시 onstop에서 blob 생성 (자동 다운로드는 하지 않음)
+// - 권한 거부/미지원 시에는 전사만 진행
 // ─────────────────────────────────────────
-async function saveAudio() {
-  if (audioBlob) { _downloadAudio(); return; }
+async function startAudioCapture() {
+  if (mediaRecorder) return; // 이미 캡처 중 (언어 변경 등으로 재시작된 경우)
+  audioChunks = [];
+  audioBlob   = null;
+  discarding  = false;
 
-  if (!recording) { showToast('녹음을 먼저 진행해 주세요'); return; }
-  if (mediaRecorder) { showToast('이미 녹음 파일을 캡처 중이에요'); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+    return; // 미지원 브라우저 → 전사만
+  }
 
+  let stream;
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch {
-    showErr('녹음 저장을 위해 마이크 권한이 필요해요.');
+    showToast('마이크 녹음 캡처를 시작할 수 없어 전사만 진행해요');
     return;
   }
 
-  audioChunks = [];
-  discarding  = false;
-  mediaRecorder = new MediaRecorder(micStream);
+  // getUserMedia 대기 중 사용자가 이미 중지했다면 스트림 정리 후 종료
+  if (!recording) { stream.getTracks().forEach(t => t.stop()); return; }
+
+  micStream = stream;
+  try {
+    mediaRecorder = new MediaRecorder(micStream);
+  } catch {
+    releaseMic();
+    return;
+  }
   mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
   mediaRecorder.onstop = () => {
     if (discarding) { audioChunks = []; releaseMic(); return; } // clearAll 중이면 무시
     if (audioChunks.length > 0) {
       audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-      _downloadAudio();
     }
     releaseMic();
-    document.getElementById('saveAudioBtn').disabled = !!audioBlob ? false : true;
+    document.getElementById('saveAudioBtn').disabled = !audioBlob;
+    setAudioForPlayback(audioBlob);   // 방금 녹음한 오디오 재생 가능
+    updateArchiveBtn();
   };
   mediaRecorder.start(1000);
-  showToast('녹음 캡처 중 — 중지 버튼을 누르면 저장돼요');
+}
+
+// 녹음 저장: 자동 캡처된 blob을 다운로드
+function saveAudio() {
+  if (audioBlob) { _downloadAudio(); return; }
+  if (recording)  { showToast('녹음 종료 후 저장할 수 있어요'); return; }
+  showToast('녹음을 먼저 진행해 주세요');
+}
+
+// ─────────────────────────────────────────
+// 파일 불러오기 (로컬에 저장한 전사 .txt / 녹음 오디오) + 재생
+// ─────────────────────────────────────────
+let playerUrl = null;
+
+function handleFileLoad(e){
+  const file = e.target.files && e.target.files[0];
+  e.target.value = ''; // 같은 파일을 다시 선택할 수 있도록 초기화
+  if (!file) return;
+  if (recording) { showToast('녹음 중에는 불러올 수 없어요'); return; }
+
+  const isAudio = file.type.startsWith('audio/') || /\.(webm|ogg|mp4|m4a|mp3|wav|aac|flac)$/i.test(file.name);
+  const isText  = file.type.startsWith('text/')  || /\.txt$/i.test(file.name);
+
+  if (isAudio) {
+    audioBlob   = file;
+    audioChunks = [];
+    setAudioForPlayback(file);                                   // 재생 버튼 활성화
+    document.getElementById('saveAudioBtn').disabled = false;
+    document.getElementById('statusText').textContent = '녹음 불러옴';
+    updateArchiveBtn();
+    showToast('녹음 파일을 불러왔어요 — ▶️ 재생을 눌러보세요');
+  } else if (isText) {
+    const reader = new FileReader();
+    reader.onload  = () => {
+      finalTx = String(reader.result || '').trim() + ' ';
+      renderTx('');
+      document.getElementById('statusText').textContent = '전사 불러옴';
+      showToast('전사 파일을 불러왔어요');
+    };
+    reader.onerror = () => showToast('파일을 읽을 수 없어요');
+    reader.readAsText(file);
+  } else {
+    showToast('지원하지 않는 파일 형식이에요 (.txt 또는 오디오 파일)');
+  }
+}
+
+// 재생용 오디오 소스 설정 + 재생 버튼 활성/비활성
+function setAudioForPlayback(blob){
+  const player  = document.getElementById('player');
+  const playBtn = document.getElementById('playBtn');
+  try { player.pause(); } catch {}
+  if (playerUrl) { try { URL.revokeObjectURL(playerUrl); } catch {} playerUrl = null; }
+  if (blob) {
+    playerUrl  = URL.createObjectURL(blob);
+    player.src = playerUrl;
+    playBtn.disabled = false;
+  } else {
+    player.removeAttribute('src');
+    try { player.load(); } catch {}
+    playBtn.disabled = true;
+  }
+  playBtn.textContent = '▶️ 재생';
+}
+
+// 재생 / 일시정지 토글
+function togglePlay(){
+  const player  = document.getElementById('player');
+  const playBtn = document.getElementById('playBtn');
+  if (!player.getAttribute('src')) { showToast('재생할 녹음이 없어요'); return; }
+  player.onended = () => { playBtn.textContent = '▶️ 재생'; };
+  if (player.paused) {
+    player.play().then(() => { playBtn.textContent = '⏸️ 일시정지'; })
+                 .catch(() => showToast('재생할 수 없어요'));
+  } else {
+    player.pause();
+    playBtn.textContent = '▶️ 재생';
+  }
 }
 
 function _downloadAudio() {
@@ -341,8 +486,9 @@ function setRecordingUI() {
   document.getElementById('statusText').textContent = '녹음 중...';
   document.getElementById('errorMsg').style.display = 'none';
   document.getElementById('micIcon').innerHTML = '<rect x="6" y="6" width="12" height="12" rx="2"/>';
-  // 녹음 저장 버튼: 녹음 중에만 활성 (MediaRecorder 시작 전 안내용)
-  document.getElementById('saveAudioBtn').disabled = false;
+  // 녹음 저장 버튼: 녹음 중에는 비활성 (blob은 중지 후 생성됨)
+  document.getElementById('saveAudioBtn').disabled = true;
+  setAudioForPlayback(null); // 새 녹음 시작 → 이전 재생 소스 정리
 }
 
 function setStoppedUI() {
@@ -429,6 +575,7 @@ function renderTx(interim) {
     document.getElementById('summarizeBtn').disabled = true;
     document.getElementById('saveTxtBtn').disabled = true;
   }
+  updateArchiveBtn();
 }
 
 // ─────────────────────────────────────────
@@ -505,6 +652,8 @@ function clearAll() {
   document.getElementById('saveAudioBtn').disabled = true;
   document.getElementById('saveTxtBtn').disabled = true;
   document.getElementById('summarizeBtn').disabled = true;
+  document.getElementById('archiveBtn').disabled = true;
+  setAudioForPlayback(null); // 재생 소스/버튼 초기화
   document.getElementById('errorMsg').style.display = 'none';
   document.getElementById('wc').textContent = '';
 }
@@ -566,6 +715,234 @@ function loadApiKey(){
   }catch{}
 }
 loadApiKey();
+
+// ─────────────────────────────────────────
+// 보관함 (전사·녹음 내역) — IndexedDB 저장
+// ─────────────────────────────────────────
+const DB_NAME = 'meetingRecorder';
+const STORE   = 'sessions';
+let histUrls  = []; // 렌더 시 생성한 objectURL — 재렌더 전 해제
+
+function idbOpen(){
+  return new Promise((resolve,reject)=>{
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath:'id', autoIncrement:true });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+function idbTx(mode, fn){
+  return idbOpen().then(db => new Promise((resolve,reject)=>{
+    const tx = db.transaction(STORE, mode);
+    const store = tx.objectStore(STORE);
+    let result;
+    Promise.resolve(fn(store)).then(r => { result = r; });
+    tx.oncomplete = () => { db.close(); resolve(result); };
+    tx.onerror    = () => { db.close(); reject(tx.error); };
+  }));
+}
+function idbAdd(record){
+  return idbTx('readwrite', store => new Promise((res,rej)=>{
+    const r = store.add(record); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);
+  }));
+}
+function idbGetAll(){
+  return idbTx('readonly', store => new Promise((res,rej)=>{
+    const r = store.getAll(); r.onsuccess=()=>res(r.result||[]); r.onerror=()=>rej(r.error);
+  }));
+}
+function idbDelete(id){
+  return idbTx('readwrite', store => new Promise((res,rej)=>{
+    const r = store.delete(id); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error);
+  }));
+}
+
+function updateArchiveBtn(){
+  const btn = document.getElementById('archiveBtn');
+  if (btn) btn.disabled = !(finalTx.trim() || audioBlob);
+}
+
+// 현재 세션(전사 + 캡처된 녹음)을 보관함에 저장
+async function archiveSession(){
+  const text = finalTx.trim();
+  if (!text && !audioBlob) { showToast('저장할 내용이 없어요'); return; }
+  const record = {
+    createdAt: Date.now(),
+    lang     : currentLang,
+    transcript: text,
+    words    : text ? text.split(/\s+/).filter(Boolean).length : 0,
+    audio    : audioBlob || null,
+    mime     : audioBlob ? (audioBlob.type || 'audio/webm') : null
+  };
+  try {
+    await idbAdd(record);
+    showToast('보관함에 저장됐어요');
+  } catch {
+    showToast('보관함 저장에 실패했어요');
+  }
+}
+
+// ─────────────────────────────────────────
+// 보관함 뷰 토글 / 렌더링
+// ─────────────────────────────────────────
+function openHistory(){
+  document.getElementById('mainView').style.display='none';
+  document.getElementById('settingsView').style.display='none';
+  document.getElementById('historyView').style.display='block';
+  window.scrollTo(0,0);
+  renderHistory();
+}
+function closeHistory(){
+  releaseHistUrls();
+  document.getElementById('historyView').style.display='none';
+  document.getElementById('mainView').style.display='block';
+  window.scrollTo(0,0);
+}
+function releaseHistUrls(){
+  histUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch {} });
+  histUrls = [];
+}
+
+function fmtDate(ms){
+  try { return new Date(ms).toLocaleString('ko-KR'); } catch { return ''; }
+}
+function langLabel(code){
+  return ({'ko-KR':'🇰🇷 한국어','en-US':'🇺🇸 English','zh-CN':'🇨🇳 简体中文','zh-TW':'🇹🇼 繁體中文'})[code] || code || '';
+}
+
+async function renderHistory(){
+  releaseHistUrls();
+  const listEl = document.getElementById('historyList');
+  const countEl = document.getElementById('histCount');
+  let items = [];
+  try { items = await idbGetAll(); } catch { items = []; }
+  items.sort((a,b) => b.createdAt - a.createdAt);
+
+  countEl.textContent = items.length ? items.length + '건' : '';
+  listEl.innerHTML = '';
+
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'history-empty';
+    empty.textContent = '아직 저장된 내역이 없어요. 녹음 후 "보관함에 저장"을 눌러보세요.';
+    listEl.appendChild(empty);
+    return;
+  }
+
+  items.forEach(rec => listEl.appendChild(buildHistItem(rec)));
+}
+
+function buildHistItem(rec){
+  const item = document.createElement('div');
+  item.className = 'hist-item';
+
+  // 헤더 (날짜 + 메타)
+  const head = document.createElement('div');
+  head.className = 'hist-head';
+  const left = document.createElement('div');
+  const date = document.createElement('div');
+  date.className = 'hist-date';
+  date.textContent = fmtDate(rec.createdAt);
+  const meta = document.createElement('div');
+  meta.className = 'hist-meta';
+  meta.appendChild(makeTag(langLabel(rec.lang)));
+  if (rec.transcript) meta.appendChild(makeTag('📝 ' + rec.words + '단어'));
+  if (rec.audio)      meta.appendChild(makeTag('🎵 녹음'));
+  left.appendChild(date); left.appendChild(meta);
+  head.appendChild(left);
+  item.appendChild(head);
+
+  // 전사 미리보기
+  if (rec.transcript) {
+    const prev = document.createElement('div');
+    prev.className = 'hist-preview';
+    prev.textContent = rec.transcript.length > 140 ? rec.transcript.slice(0,140) + '…' : rec.transcript;
+    item.appendChild(prev);
+  }
+
+  // 녹음 재생 플레이어
+  if (rec.audio) {
+    const url = URL.createObjectURL(rec.audio);
+    histUrls.push(url);
+    const audio = document.createElement('audio');
+    audio.className = 'hist-audio';
+    audio.controls = true;
+    audio.src = url;
+    item.appendChild(audio);
+  }
+
+  // 액션 버튼
+  const actions = document.createElement('div');
+  actions.className = 'hist-actions';
+
+  if (rec.transcript) {
+    const loadBtn = document.createElement('button');
+    loadBtn.className = 'btn btn-primary';
+    loadBtn.textContent = '📄 전사 불러오기';
+    loadBtn.onclick = () => loadHistorySession(rec);
+    actions.appendChild(loadBtn);
+  }
+  if (rec.audio) {
+    const dlBtn = document.createElement('button');
+    dlBtn.className = 'btn btn-ghost';
+    dlBtn.textContent = '⬇️ 녹음 다운로드';
+    dlBtn.onclick = () => downloadHistAudio(rec);
+    actions.appendChild(dlBtn);
+  }
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn btn-danger-ghost';
+  delBtn.textContent = '🗑 삭제';
+  delBtn.onclick = () => deleteHistorySession(rec.id);
+  actions.appendChild(delBtn);
+
+  item.appendChild(actions);
+  return item;
+}
+
+function makeTag(text){
+  const t = document.createElement('span');
+  t.className = 'hist-tag';
+  t.textContent = text;
+  return t;
+}
+
+// 보관된 전사를 메인 화면으로 불러오기
+function loadHistorySession(rec){
+  if (recording) { showToast('녹음 중에는 불러올 수 없어요'); return; }
+  finalTx   = rec.transcript ? rec.transcript.trim() + ' ' : '';
+  audioBlob = rec.audio || null;
+  audioChunks = [];
+  renderTx('');
+  document.getElementById('saveAudioBtn').disabled = !audioBlob;
+  setAudioForPlayback(audioBlob); // 녹음 포함 세션이면 재생 버튼 활성화
+  document.getElementById('statusText').textContent = finalTx.trim() ? '불러옴' : '녹음 시작';
+  document.getElementById('summaryCard').style.display = 'none';
+  document.getElementById('summaryBox').textContent = '';
+  closeHistory();
+  showToast('보관함에서 불러왔어요');
+}
+
+function downloadHistAudio(rec){
+  if (!rec.audio) return;
+  const stamp = (() => { const d=new Date(rec.createdAt);
+    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`; })();
+  const mime = rec.mime || rec.audio.type || '';
+  const ext  = mime.includes('ogg')?'ogg':mime.includes('mp4')?'mp4':'webm';
+  _download(rec.audio, `회의녹음_${stamp}.${ext}`);
+  showToast('녹음 파일이 저장됐어요');
+}
+
+async function deleteHistorySession(id){
+  if (!confirm('이 내역을 삭제할까요? 되돌릴 수 없어요.')) return;
+  try { await idbDelete(id); showToast('삭제됐어요'); }
+  catch { showToast('삭제에 실패했어요'); }
+  renderHistory();
+}
 </script>
 </body>
 </html>
