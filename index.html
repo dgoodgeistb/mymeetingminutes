@@ -138,6 +138,7 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
         AI 요약
       </button>
+      <button class="btn btn-ghost" id="refineBtn" onclick="refineTranscript()" disabled>✨ AI 교정</button>
       <div class="divider"></div>
       <button class="btn btn-ghost" id="saveTxtBtn" onclick="saveText()" disabled>📄 텍스트 저장</button>
       <button class="btn btn-ghost" id="saveAudioBtn" onclick="saveAudio()" disabled>🎵 녹음 저장</button>
@@ -181,7 +182,7 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
   </header>
 
   <div class="card">
-    <div class="card-title">Anthropic API 키 (AI 요약용)</div>
+    <div class="card-title">Anthropic API 키 (AI 요약·교정용)</div>
     <div class="api-key-row">
       <input class="api-input" type="password" id="apiKey" placeholder="sk-ant-..." />
       <button class="btn btn-ghost" onclick="toggleApiVis()">보기</button>
@@ -233,22 +234,34 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 let recording    = false;
-let finalTx      = '';
 let currentLang  = 'ko-KR';
 let hasInterim   = false;
 let animId       = null;
 let recog        = null;
-let discarding   = false; // clearAll 중 MediaRecorder onstop 무시 플래그
+let discarding   = false;
 
-// MediaRecorder — 녹음 저장 버튼 클릭 시에만 초기화
+// ── 전사 텍스트: 세션 재구성 방식 (중복·유실 방지) ──
+// committedTx: 종료된 인식 세션들의 확정 텍스트
+// sessionFinal: 현재 세션에서 isFinal로 확정된 텍스트 (세션 종료 시 커밋)
+let committedTx  = '';
+let sessionFinal = '';
+function fullTx(){ return (committedTx + sessionFinal).trim(); }
+
+// MediaRecorder
 let micStream    = null;
 let mediaRecorder= null;
 let audioChunks  = [];
 let audioBlob    = null;
 
+// 안정화 장치
+let wakeLock     = null;
+let recStartTs   = 0;
+let elapsedTimer = null;
+let lastEvtTs    = 0;
+let watchdogTimer= null;
+
 // ─────────────────────────────────────────
-// SpeechRecognition: 최초 1회 생성, 재사용
-// getUserMedia 는 절대 여기서 호출하지 않음
+// SpeechRecognition — 세션 재구성 + 자동 복구
 // ─────────────────────────────────────────
 function ensureSR() {
   if (recog) { recog.lang = currentLang; return true; }
@@ -259,29 +272,109 @@ function ensureSR() {
   recog.interimResults = true;
   recog.lang           = currentLang;
 
+  recog.onstart = () => { lastEvtTs = Date.now(); };
+  recog.onaudiostart = recog.onsoundstart = recog.onspeechstart = () => { lastEvtTs = Date.now(); };
+
+  // 세션 내 전체 결과를 매번 재구성 → resultIndex 누적 방식의
+  // 중복(Android)·재전달(iOS) 버그를 원천 차단
   recog.onresult = e => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) { finalTx += e.results[i][0].transcript + ' '; hasInterim = false; }
-      else { interim += e.results[i][0].transcript; hasInterim = true; }
+    lastEvtTs = Date.now();
+    let sf = '', interim = '';
+    for (let i = 0; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) sf += t + ' ';
+      else interim += t;
     }
+    sessionFinal = sf;
+    hasInterim = !!interim.trim();
     renderTx(interim);
   };
 
   recog.onspeechend = () => { hasInterim = false; };
 
   recog.onerror = e => {
-    if (e.error === 'no-speech' || e.error === 'network') return;
+    if (e.error === 'no-speech' || e.error === 'network' || e.error === 'aborted') return;
     if (e.error === 'not-allowed') {
       showErr('마이크 권한이 필요해요. 브라우저 설정에서 허용해 주세요.');
       _forceStop();
     }
   };
 
-  // iOS 포함 자동종료 시 재시작 — 플래그로 안전하게 제어
-  recog.onend = () => { if (recording) { try { recog.start(); } catch {} } };
+  // 세션 종료 → 커밋 후 자동 재시작 (실패 시 300ms 후 재시도)
+  recog.onend = () => {
+    commitSession();
+    if (recording) tryStart();
+  };
   return true;
 }
+
+function tryStart(){
+  try { recog.start(); }
+  catch {
+    setTimeout(() => { if (recording && recog) { try { recog.start(); } catch {} } }, 300);
+  }
+}
+
+// 세션 확정 텍스트를 커밋 — 재전달로 인한 꼬리 중복은 스킵
+function commitSession(){
+  const s = sessionFinal.trim();
+  sessionFinal = '';
+  if (!s) return;
+  const c = committedTx.trim();
+  if (c && (c === s || c.endsWith(' ' + s))) { committedTx = c + ' '; return; }
+  committedTx = (c ? c + ' ' : '') + s + ' ';
+}
+
+// ─────────────────────────────────────────
+// 워치독: 45초간 이벤트가 없으면 세션 재기동 (소리 없이 죽는 현상 복구)
+// ─────────────────────────────────────────
+function startWatchdog(){
+  stopWatchdog();
+  watchdogTimer = setInterval(() => {
+    if (!recording) return;
+    if (Date.now() - lastEvtTs > 45000) {
+      lastEvtTs = Date.now();
+      try { recog && recog.stop(); } catch {} // stop → onend → 커밋+재시작
+    }
+  }, 10000);
+}
+function stopWatchdog(){ if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; } }
+
+// ─────────────────────────────────────────
+// Wake Lock: 녹음 중 화면 꺼짐 방지 (화면이 꺼지면 인식이 중단됨)
+// ─────────────────────────────────────────
+async function acquireWakeLock(){
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+}
+function releaseWakeLock(){ try { wakeLock && wakeLock.release(); } catch {} wakeLock = null; }
+
+// 탭 복귀 시: Wake Lock 재획득 + 인식 재기동 시도
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && recording) {
+    acquireWakeLock();
+    lastEvtTs = Date.now();
+    try { recog && recog.start(); } catch {}
+  }
+});
+
+// 녹음 중 페이지 이탈 경고
+window.addEventListener('beforeunload', e => {
+  if (recording) { e.preventDefault(); e.returnValue = ''; }
+});
+
+// ─────────────────────────────────────────
+// 녹음 경과 시간
+// ─────────────────────────────────────────
+function startElapsed(){
+  recStartTs = Date.now();
+  stopElapsed();
+  elapsedTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - recStartTs) / 1000);
+    document.getElementById('statusText').textContent = '녹음 중... ' + fmtDur(s);
+  }, 1000);
+}
+function stopElapsed(){ if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; } }
+function fmtDur(s){ return `${pad(Math.floor(s/60))}:${pad(s%60)}`; }
 
 // ─────────────────────────────────────────
 // 녹음 토글
@@ -290,103 +383,118 @@ function toggleRecord() { recording ? stopRec() : startRec(); }
 
 function startRec() {
   if (!ensureSR()) return;
-  recording = true;
+  recording  = true;
   hasInterim = false;
+  lastEvtTs  = Date.now();
   setRecordingUI();
   startEQ();
-  try { recog.start(); } catch {}
+  startElapsed();
+  startWatchdog();
+  acquireWakeLock();
+  tryStart();
   startAudioCapture(); // 녹음 시작과 동시에 오디오 자동 캡처
 }
 
 function stopRec() {
-  recording = false; // onend 재시작 차단
+  recording = false; // onend 재시작 차단 (onend에서 커밋은 수행됨)
   if (recog) { try { recog.stop(); } catch {} }
-  // MediaRecorder 중지 → onstop에서 blob 생성 및 버튼 활성화
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-  }
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
   stopEQ();
-  renderTx(''); // interim 텍스트 제거
+  stopElapsed();
+  stopWatchdog();
+  releaseWakeLock();
+  renderTx('');
   setStoppedUI();
 }
 
-// 강제 종료 (권한 오류 등)
+// 강제 종료 (권한 오류 등) — 진행 중 텍스트는 커밋해 보존
 function _forceStop() {
   recording = false;
   if (recog) { try { recog.stop(); } catch {} }
+  commitSession();
   stopEQ();
+  stopElapsed();
+  stopWatchdog();
+  releaseWakeLock();
   renderTx('');
   setStoppedUI();
 }
 
 // ─────────────────────────────────────────
-// 언어 변경 — fix: EQ/UI 정리 후 SR 재생성
+// 언어 변경 — 진행 텍스트 커밋 후 SR 재생성
 // ─────────────────────────────────────────
 function setLang(lang, btn) {
   currentLang = lang;
   document.querySelectorAll('.lang-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   if (recording) {
-    // 완전히 종료 후 새 언어로 재시작
     recording = false;
     if (recog) { try { recog.onend = null; recog.stop(); } catch {} recog = null; }
+    commitSession(); // onend를 제거했으므로 수동 커밋 (텍스트 유실 방지)
     stopEQ();
+    stopElapsed();
+    stopWatchdog();
     setStoppedUI();
     setTimeout(() => startRec(), 300);
   } else {
-    // SR 인스턴스만 교체 (lang 변경 반영)
     if (recog) { try { recog.onend = null; recog.stop(); } catch {} recog = null; }
+    commitSession();
+    renderTx('');
   }
 }
 
 // ─────────────────────────────────────────
-// 오디오 자동 캡처: 녹음 시작과 동시에 getUserMedia + MediaRecorder
-// - 중지 시 onstop에서 blob 생성 (자동 다운로드는 하지 않음)
-// - 권한 거부/미지원 시에는 전사만 진행
+// 오디오 자동 캡처 — 노이즈 억제·자동 게인 + 코덱/비트레이트 명시
 // ─────────────────────────────────────────
 async function startAudioCapture() {
-  if (mediaRecorder) return; // 이미 캡처 중 (언어 변경 등으로 재시작된 경우)
+  if (mediaRecorder) return; // 이미 캡처 중 (언어 변경 재시작 등)
   audioChunks = [];
   audioBlob   = null;
   discarding  = false;
 
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
-    return; // 미지원 브라우저 → 전사만
-  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') return;
 
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // 회의 녹음 품질 향상: 노이즈 억제 + 자동 게인(먼 화자 보정), 에코 캔슬은 비활성(음성 왜곡 방지)
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { noiseSuppression: true, autoGainControl: true, echoCancellation: false }
+    });
   } catch {
-    showToast('마이크 녹음 캡처를 시작할 수 없어 전사만 진행해요');
-    return;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch { showToast('마이크 녹음 캡처를 시작할 수 없어 전사만 진행해요'); return; }
   }
 
-  // getUserMedia 대기 중 사용자가 이미 중지했다면 스트림 정리 후 종료
   if (!recording) { stream.getTracks().forEach(t => t.stop()); return; }
 
   micStream = stream;
-  try {
-    mediaRecorder = new MediaRecorder(micStream);
-  } catch {
-    releaseMic();
-    return;
+
+  // 지원 코덱 자동 선택: opus(webm) → mp4(iOS) → 기본값
+  let mime = '';
+  if (MediaRecorder.isTypeSupported) {
+    if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) mime = 'audio/webm;codecs=opus';
+    else if (MediaRecorder.isTypeSupported('audio/mp4')) mime = 'audio/mp4';
   }
+  try {
+    mediaRecorder = new MediaRecorder(micStream, mime ? { mimeType: mime, audioBitsPerSecond: 128000 } : undefined);
+  } catch {
+    try { mediaRecorder = new MediaRecorder(micStream); } catch { releaseMic(); return; }
+  }
+
   mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
   mediaRecorder.onstop = () => {
-    if (discarding) { audioChunks = []; releaseMic(); return; } // clearAll 중이면 무시
+    if (discarding) { audioChunks = []; releaseMic(); return; }
     if (audioChunks.length > 0) {
       audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
     }
     releaseMic();
     document.getElementById('saveAudioBtn').disabled = !audioBlob;
-    setAudioForPlayback(audioBlob);   // 방금 녹음한 오디오 재생 가능
+    setAudioForPlayback(audioBlob);
     updateArchiveBtn();
   };
   mediaRecorder.start(1000);
 }
 
-// 녹음 저장: 자동 캡처된 blob을 다운로드
 function saveAudio() {
   if (audioBlob) { _downloadAudio(); return; }
   if (recording)  { showToast('녹음 종료 후 저장할 수 있어요'); return; }
@@ -394,13 +502,13 @@ function saveAudio() {
 }
 
 // ─────────────────────────────────────────
-// 파일 불러오기 (로컬에 저장한 전사 .txt / 녹음 오디오) + 재생
+// 파일 불러오기 (.txt / 오디오) + 재생
 // ─────────────────────────────────────────
 let playerUrl = null;
 
 function handleFileLoad(e){
   const file = e.target.files && e.target.files[0];
-  e.target.value = ''; // 같은 파일을 다시 선택할 수 있도록 초기화
+  e.target.value = '';
   if (!file) return;
   if (recording) { showToast('녹음 중에는 불러올 수 없어요'); return; }
 
@@ -410,7 +518,7 @@ function handleFileLoad(e){
   if (isAudio) {
     audioBlob   = file;
     audioChunks = [];
-    setAudioForPlayback(file);                                   // 재생 버튼 활성화
+    setAudioForPlayback(file);
     document.getElementById('saveAudioBtn').disabled = false;
     document.getElementById('statusText').textContent = '녹음 불러옴';
     updateArchiveBtn();
@@ -418,7 +526,12 @@ function handleFileLoad(e){
   } else if (isText) {
     const reader = new FileReader();
     reader.onload  = () => {
-      finalTx = String(reader.result || '').trim() + ' ';
+      let content = String(reader.result || '');
+      // 이 앱에서 저장한 .txt의 헤더(제목/날짜/구분선) 자동 제거
+      content = content.replace(/^회의 전사 내용\s*\r?\n날짜:[^\r\n]*\r?\n─+\r?\n\r?\n?/, '');
+      committedTx  = content.trim() ? content.trim() + ' ' : '';
+      sessionFinal = '';
+      hasInterim   = false;
       renderTx('');
       document.getElementById('statusText').textContent = '전사 불러옴';
       showToast('전사 파일을 불러왔어요');
@@ -430,7 +543,6 @@ function handleFileLoad(e){
   }
 }
 
-// 재생용 오디오 소스 설정 + 재생 버튼 활성/비활성
 function setAudioForPlayback(blob){
   const player  = document.getElementById('player');
   const playBtn = document.getElementById('playBtn');
@@ -448,7 +560,6 @@ function setAudioForPlayback(blob){
   playBtn.textContent = '▶️ 재생';
 }
 
-// 재생 / 일시정지 토글
 function togglePlay(){
   const player  = document.getElementById('player');
   const playBtn = document.getElementById('playBtn');
@@ -467,7 +578,7 @@ function _downloadAudio() {
   if (!audioBlob) return;
   const now   = new Date();
   const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
-  const ext   = audioBlob.type.includes('ogg')?'ogg':audioBlob.type.includes('mp4')?'mp4':'webm';
+  const ext   = (audioBlob.type||'').includes('ogg')?'ogg':(audioBlob.type||'').includes('mp4')?'mp4':'webm';
   _download(audioBlob, `회의녹음_${stamp}.${ext}`);
   showToast('녹음 파일이 저장됐어요');
 }
@@ -486,26 +597,24 @@ function setRecordingUI() {
   document.getElementById('statusText').textContent = '녹음 중...';
   document.getElementById('errorMsg').style.display = 'none';
   document.getElementById('micIcon').innerHTML = '<rect x="6" y="6" width="12" height="12" rx="2"/>';
-  // 녹음 저장 버튼: 녹음 중에는 비활성 (blob은 중지 후 생성됨)
   document.getElementById('saveAudioBtn').disabled = true;
-  setAudioForPlayback(null); // 새 녹음 시작 → 이전 재생 소스 정리
+  setAudioForPlayback(null);
 }
 
 function setStoppedUI() {
   document.getElementById('recordBtn').classList.remove('recording');
   document.getElementById('statusBadge').classList.remove('recording');
-  document.getElementById('statusText').textContent = finalTx.trim() ? '녹음 완료' : '녹음 시작';
+  document.getElementById('statusText').textContent = fullTx() ? '녹음 완료' : '녹음 시작';
   document.getElementById('micIcon').innerHTML =
     '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>' +
     '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>' +
     '<line x1="12" y1="19" x2="12" y2="23"/>' +
     '<line x1="8" y1="23" x2="16" y2="23"/>';
-  // blob 있으면 활성 유지, 없으면 비활성
   document.getElementById('saveAudioBtn').disabled = !audioBlob;
 }
 
 // ─────────────────────────────────────────
-// 이퀄라이저 — roundRect 폴리필 적용 (Safari 구버전 호환)
+// 이퀄라이저 — roundRect 폴리필 포함
 // ─────────────────────────────────────────
 function drawBar(ctx, x, y, w, h, r) {
   if (typeof ctx.roundRect === 'function') {
@@ -556,24 +665,34 @@ function stopEQ() {
 }
 
 // ─────────────────────────────────────────
-// 전사 렌더링
+// 전사 렌더링 — HTML 이스케이프 + 언어별 카운트
 // ─────────────────────────────────────────
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function countLabel(text){
+  if (/^zh/.test(currentLang)) return text.replace(/\s+/g,'').length + '자';
+  return text.split(/\s+/).filter(Boolean).length + '단어';
+}
+
 function renderTx(interim) {
   const box = document.getElementById('transcriptBox');
-  const combined = finalTx.trim() + (interim ? ` <span class="interim">${interim}</span>` : '');
+  const full = fullTx();
+  const combined = esc(full) + (interim ? ` <span class="interim">${esc(interim)}</span>` : '');
   if (combined.trim()) {
     box.classList.remove('empty');
     box.innerHTML = combined;
     box.scrollTop = box.scrollHeight;
-    document.getElementById('wc').textContent = finalTx.trim().split(/\s+/).filter(Boolean).length + '단어';
-    document.getElementById('summarizeBtn').disabled = false;
-    document.getElementById('saveTxtBtn').disabled = false;
+    document.getElementById('wc').textContent = full ? countLabel(full) : '';
+    document.getElementById('summarizeBtn').disabled = !full;
+    document.getElementById('saveTxtBtn').disabled = !full;
+    document.getElementById('refineBtn').disabled = !full;
   } else {
     box.classList.add('empty');
     box.textContent = '녹음을 시작하면 음성이 실시간으로 텍스트로 변환됩니다.';
     document.getElementById('wc').textContent = '';
     document.getElementById('summarizeBtn').disabled = true;
     document.getElementById('saveTxtBtn').disabled = true;
+    document.getElementById('refineBtn').disabled = true;
   }
   updateArchiveBtn();
 }
@@ -582,7 +701,7 @@ function renderTx(interim) {
 // 텍스트 저장
 // ─────────────────────────────────────────
 function saveText() {
-  const text = finalTx.trim(); if (!text) return;
+  const text = fullTx(); if (!text) return;
   const now = new Date();
   const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
   const content = `회의 전사 내용\n날짜: ${now.toLocaleString('ko-KR')}\n${'─'.repeat(40)}\n\n${text}`;
@@ -591,12 +710,39 @@ function saveText() {
 }
 
 // ─────────────────────────────────────────
+// Anthropic API 공통 호출
+// ─────────────────────────────────────────
+function getApiKey(){
+  const key = document.getElementById('apiKey').value.trim();
+  if (!key) { alert('API 키를 입력해 주세요. (좌측 상단 톱니바퀴 → 환경설정)'); openSettings(); return null; }
+  return key;
+}
+
+async function callClaude(apiKey, prompt, maxTokens){
+  const res = await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'x-api-key':apiKey,
+      'anthropic-version':'2023-06-01',
+      'anthropic-dangerous-direct-browser-access':'true'
+    },
+    body:JSON.stringify({
+      model:'claude-sonnet-4-6',
+      max_tokens:maxTokens,
+      messages:[{role:'user',content:prompt}]
+    })
+  });
+  const data = await res.json();
+  return data?.content?.[0]?.text ?? null;
+}
+
+// ─────────────────────────────────────────
 // AI 요약
 // ─────────────────────────────────────────
 async function summarize() {
-  const text = finalTx.trim(); if (!text) return;
-  const apiKey = document.getElementById('apiKey').value.trim();
-  if (!apiKey) { alert('API 키를 입력해 주세요. (좌측 상단 톱니바퀴 → 환경설정)'); openSettings(); return; }
+  const text = fullTx(); if (!text) return;
+  const apiKey = getApiKey(); if (!apiKey) return;
   const card = document.getElementById('summaryCard');
   const box  = document.getElementById('summaryBox');
   card.style.display = 'block';
@@ -604,23 +750,10 @@ async function summarize() {
   document.getElementById('summarizeBtn').disabled = true;
   card.scrollIntoView({behavior:'smooth',block:'nearest'});
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'x-api-key':apiKey,
-        'anthropic-version':'2023-06-01',
-        'anthropic-dangerous-direct-browser-access':'true'
-      },
-      body:JSON.stringify({
-        model:'claude-sonnet-4-20250514', max_tokens:1000,
-        messages:[{role:'user',content:
-          `다음 회의 전사 내용을 한국어로 요약해줘.\n아래 세 항목으로 구분해서 간결하게 정리해줘:\n\n📌 주요 논의 사항\n✅ 결정된 내용\n🔲 액션 아이템\n\n전사 내용:\n${text}`
-        }]
-      })
-    });
-    const data = await res.json();
-    box.textContent = data?.content?.[0]?.text ?? '응답을 파싱할 수 없어요.';
+    const result = await callClaude(apiKey,
+      `다음 회의 전사 내용을 한국어로 요약해줘.\n아래 세 항목으로 구분해서 간결하게 정리해줘:\n\n📌 주요 논의 사항\n✅ 결정된 내용\n🔲 액션 아이템\n\n전사 내용:\n${text}`,
+      1500);
+    box.textContent = result ?? '응답을 파싱할 수 없어요. API 키를 확인해 주세요.';
   } catch {
     box.textContent = '요약 중 오류가 발생했어요. API 키를 확인하거나 잠시 후 다시 시도해 주세요.';
   }
@@ -628,16 +761,52 @@ async function summarize() {
 }
 
 // ─────────────────────────────────────────
-// 초기화 — discarding 플래그로 레이스 컨디션 방지
+// ✨ AI 교정 — 오인식·띄어쓰기·문장부호 후처리 (인식률 실질 개선)
+// ─────────────────────────────────────────
+async function refineTranscript(){
+  if (recording) { showToast('녹음 종료 후 교정할 수 있어요'); return; }
+  const text = fullTx(); if (!text) return;
+  const apiKey = getApiKey(); if (!apiKey) return;
+
+  const btn = document.getElementById('refineBtn');
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = '✨ 교정 중...';
+  showToast('AI가 전사 내용을 교정하고 있어요');
+
+  try {
+    const result = await callClaude(apiKey,
+      `다음은 음성 인식으로 전사된 회의 내용이야. 원문 언어를 그대로 유지하면서:\n1) 문맥상 잘못 인식된 단어를 올바르게 교정하고\n2) 띄어쓰기와 문장부호를 정리하고\n3) 문장 단위로 자연스럽게 줄바꿈해줘.\n\n내용을 요약하거나 추가·삭제하지 말고 교정만 해. 교정된 텍스트만 출력하고 다른 설명은 붙이지 마.\n\n전사 내용:\n${text}`,
+      4000);
+    if (result) {
+      committedTx  = result.trim() + ' ';
+      sessionFinal = '';
+      renderTx('');
+      showToast('✨ AI 교정이 완료됐어요');
+    } else {
+      showToast('교정에 실패했어요. API 키를 확인해 주세요');
+    }
+  } catch {
+    showToast('교정 중 오류가 발생했어요');
+  }
+  btn.textContent = original;
+  btn.disabled = !fullTx();
+}
+
+// ─────────────────────────────────────────
+// 초기화
 // ─────────────────────────────────────────
 function clearAll() {
-  discarding = true; // MediaRecorder onstop 콜백 무시
+  discarding = true;
   if (recording) { recording = false; if (recog) { try { recog.stop(); } catch {} } }
   if (recog) { try { recog.onend=null; recog.stop(); } catch {} recog = null; }
   if (mediaRecorder && mediaRecorder.state !== 'inactive') { try { mediaRecorder.stop(); } catch {} }
   else { releaseMic(); }
   stopEQ();
-  finalTx=''; audioBlob=null; audioChunks=[];
+  stopElapsed();
+  stopWatchdog();
+  releaseWakeLock();
+  committedTx=''; sessionFinal=''; audioBlob=null; audioChunks=[];
   renderTx('');
   document.getElementById('summaryCard').style.display='none';
   document.getElementById('summaryBox').textContent='';
@@ -652,8 +821,9 @@ function clearAll() {
   document.getElementById('saveAudioBtn').disabled = true;
   document.getElementById('saveTxtBtn').disabled = true;
   document.getElementById('summarizeBtn').disabled = true;
+  document.getElementById('refineBtn').disabled = true;
   document.getElementById('archiveBtn').disabled = true;
-  setAudioForPlayback(null); // 재생 소스/버튼 초기화
+  setAudioForPlayback(null);
   document.getElementById('errorMsg').style.display = 'none';
   document.getElementById('wc').textContent = '';
 }
@@ -692,6 +862,7 @@ const API_KEY_STORAGE = 'mmm_anthropic_api_key';
 
 function openSettings(){
   document.getElementById('mainView').style.display='none';
+  document.getElementById('historyView').style.display='none';
   document.getElementById('settingsView').style.display='block';
   window.scrollTo(0,0);
 }
@@ -717,11 +888,11 @@ function loadApiKey(){
 loadApiKey();
 
 // ─────────────────────────────────────────
-// 보관함 (전사·녹음 내역) — IndexedDB 저장
+// 보관함 — IndexedDB
 // ─────────────────────────────────────────
 const DB_NAME = 'meetingRecorder';
 const STORE   = 'sessions';
-let histUrls  = []; // 렌더 시 생성한 objectURL — 재렌더 전 해제
+let histUrls  = [];
 
 function idbOpen(){
   return new Promise((resolve,reject)=>{
@@ -764,12 +935,11 @@ function idbDelete(id){
 
 function updateArchiveBtn(){
   const btn = document.getElementById('archiveBtn');
-  if (btn) btn.disabled = !(finalTx.trim() || audioBlob);
+  if (btn) btn.disabled = !(fullTx() || audioBlob);
 }
 
-// 현재 세션(전사 + 캡처된 녹음)을 보관함에 저장
 async function archiveSession(){
-  const text = finalTx.trim();
+  const text = fullTx();
   if (!text && !audioBlob) { showToast('저장할 내용이 없어요'); return; }
   const record = {
     createdAt: Date.now(),
@@ -788,7 +958,7 @@ async function archiveSession(){
 }
 
 // ─────────────────────────────────────────
-// 보관함 뷰 토글 / 렌더링
+// 보관함 뷰
 // ─────────────────────────────────────────
 function openHistory(){
   document.getElementById('mainView').style.display='none';
@@ -841,7 +1011,6 @@ function buildHistItem(rec){
   const item = document.createElement('div');
   item.className = 'hist-item';
 
-  // 헤더 (날짜 + 메타)
   const head = document.createElement('div');
   head.className = 'hist-head';
   const left = document.createElement('div');
@@ -857,7 +1026,6 @@ function buildHistItem(rec){
   head.appendChild(left);
   item.appendChild(head);
 
-  // 전사 미리보기
   if (rec.transcript) {
     const prev = document.createElement('div');
     prev.className = 'hist-preview';
@@ -865,7 +1033,6 @@ function buildHistItem(rec){
     item.appendChild(prev);
   }
 
-  // 녹음 재생 플레이어
   if (rec.audio) {
     const url = URL.createObjectURL(rec.audio);
     histUrls.push(url);
@@ -876,7 +1043,6 @@ function buildHistItem(rec){
     item.appendChild(audio);
   }
 
-  // 액션 버튼
   const actions = document.createElement('div');
   actions.className = 'hist-actions';
 
@@ -911,16 +1077,17 @@ function makeTag(text){
   return t;
 }
 
-// 보관된 전사를 메인 화면으로 불러오기
 function loadHistorySession(rec){
   if (recording) { showToast('녹음 중에는 불러올 수 없어요'); return; }
-  finalTx   = rec.transcript ? rec.transcript.trim() + ' ' : '';
+  committedTx  = rec.transcript ? rec.transcript.trim() + ' ' : '';
+  sessionFinal = '';
+  hasInterim   = false;
   audioBlob = rec.audio || null;
   audioChunks = [];
   renderTx('');
   document.getElementById('saveAudioBtn').disabled = !audioBlob;
-  setAudioForPlayback(audioBlob); // 녹음 포함 세션이면 재생 버튼 활성화
-  document.getElementById('statusText').textContent = finalTx.trim() ? '불러옴' : '녹음 시작';
+  setAudioForPlayback(audioBlob);
+  document.getElementById('statusText').textContent = fullTx() ? '불러옴' : '녹음 시작';
   document.getElementById('summaryCard').style.display = 'none';
   document.getElementById('summaryBox').textContent = '';
   closeHistory();
