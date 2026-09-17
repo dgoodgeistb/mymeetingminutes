@@ -6,6 +6,7 @@ let sessionRate=48000, sessionLang='ko', sessionTerms='', idleTimer=null, sample
 const $ = id => document.getElementById(id);
 const fullTx = () => (committedTx + sessionFinal).trim();
 const sessionBusy = () => recording || starting || stopping || preparing || aiBusy || importing || queue.length>0 || queueRunning;
+const openaiClient = new MeetingOpenAI();
 const capture = new MeetingCapture(onAudioChunk, message => {
   showErr(message);
   if (recording) void stopRec();
@@ -88,14 +89,10 @@ async function processQueue() {
       const job=queue[0]; requestController=new AbortController();
       const timer=setTimeout(()=>requestController?.abort(),120000);
       try {
-        const form=new FormData(); form.append('file',job.blob,job.name||'meeting.wav');
-        form.append('language',job.language);
-        form.append('prompt',[job.terms,fullTx().slice(-800)].filter(Boolean).join('\n'));
-        const res=await fetch('./api/transcribe',{method:'POST',body:form,signal:requestController.signal});
-        const data=await readApiResponse(res);
-        if(typeof data.text!=='string') throw new Error('전사 응답을 확인할 수 없습니다.');
+        const text=await openaiClient.transcribe({blob:job.blob,name:job.name||'meeting.wav',language:job.language,
+          prompt:[job.terms,fullTx().slice(-800)].filter(Boolean).join('\n')},requestController.signal);
         if(token!==generation) return;
-        if(data.text.trim()) committedTx += data.text.trim()+'\n';
+        if(text.trim()) committedTx += text.trim()+'\n';
         queue.shift(); renderTx('');
       } catch(error) {
         if(token!==generation) return;
@@ -133,21 +130,33 @@ document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='hidden'&&recording) showErr('화면 잠금이나 백그라운드 전환은 녹음을 중단시킬 수 있습니다. 화면을 켜 두세요.');
 });
 window.addEventListener('beforeunload',e=>{if(sessionBusy()){e.preventDefault();e.returnValue='';}});
-window.addEventListener('pagehide',()=>{void capture.release();});
-const backendHelp='전사 서버에 연결할 수 없습니다. 녹음·저장은 가능하지만 전사·AI 요약은 서버 주소에서 이용해 주세요. GitHub Pages만으로는 전사 서버가 실행되지 않습니다.';
-async function readApiResponse(res) {
-  if(res.status===404 || !(res.headers.get('content-type')||'').includes('application/json')) throw new Error(backendHelp);
-  const data=await res.json();
-  if(!res.ok) throw new Error(data.error || '서버 요청에 실패했습니다.');
-  return data;
+window.addEventListener('pagehide',()=>{clearApiKey(false);void capture.release();});
+function updateKeyStatus() {
+  const hasKey=openaiClient.hasKey();
+  $('apiKeyStatus').textContent=hasKey?'키 입력됨 · 이 탭에서만 사용 · 실제 API 요청 시 유효성을 확인합니다.':'키를 입력해 주세요.';
+  $('apiNotice').textContent=hasKey?'':'환경설정에서 OpenAI API 키를 입력하면 전사와 AI 요약을 사용할 수 있습니다. 키 없이도 녹음·저장은 가능합니다.';
+  $('apiNotice').hidden=hasKey;
 }
-fetch('./api/health').then(readApiResponse).then(d=>{
-  $('serverStatus').textContent=d.configured?'서버 연결됨':'서버에 OPENAI_API_KEY 설정이 필요합니다.';
-}).catch(()=>{
-  $('serverStatus').textContent=backendHelp;
-  $('serverNotice').textContent=backendHelp;
-  $('serverNotice').hidden=false;
-});
+function applyApiKey() {
+  try {
+    if(queueRunning || aiBusy) {showToast('진행 중인 API 요청이 끝난 뒤 키를 변경해 주세요');return;}
+    openaiClient.setKey($('apiKey').value);
+    $('apiKey').value=''; $('apiKey').type='password';
+    $('toggleKeyBtn').textContent='보기'; $('toggleKeyBtn').setAttribute('aria-pressed','false');
+    updateKeyStatus(); showToast('이 탭에서 키를 사용합니다. 미완료 전사는 재시도해 주세요.');
+  } catch(error) {showToast(error.message);}
+}
+function clearApiKey(notify=true) {
+  openaiClient.clearKey(); $('apiKey').value=''; $('apiKey').type='password';
+  $('toggleKeyBtn').textContent='보기'; $('toggleKeyBtn').setAttribute('aria-pressed','false');
+  updateKeyStatus(); if(notify)showToast('키를 삭제했습니다. 새 요청에는 키를 다시 입력해 주세요.');
+}
+function toggleApiVis() {
+  const input=$('apiKey'), visible=input.type==='password';
+  input.type=visible?'text':'password'; $('toggleKeyBtn').textContent=visible?'숨기기':'보기';
+  $('toggleKeyBtn').setAttribute('aria-pressed',String(visible));
+}
+updateKeyStatus();
 function saveAudio() {
   if (audioBlob) { _downloadAudio(); return; }
   if (recording)  { showToast('녹음 종료 후 저장할 수 있어요'); return; }
@@ -362,13 +371,10 @@ function saveText() {
 }
 
 // ─────────────────────────────────────────
-// 서버 AI API 공통 호출
+// 브라우저에서 OpenAI API 직접 호출
 // ─────────────────────────────────────────
 async function callAI(action, text) {
-  const res = await fetch('./api/ai', {method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action, text}), signal:AbortSignal.timeout(120000)});
-  const data = await readApiResponse(res);
-  return data.text;
+  return openaiClient.ai(action,text);
 }
 
 // ─────────────────────────────────────────
@@ -386,7 +392,7 @@ async function summarize() {
   card.scrollIntoView({behavior:'smooth',block:'nearest'});
   try {
     const result = await callAI('summarize', text);
-    box.textContent = result ?? '응답을 파싱할 수 없어요. 서버 설정을 확인해 주세요.';
+    box.textContent = result ?? '응답을 파싱할 수 없어요. OpenAI API 키를 확인해 주세요.';
   } catch(error) {
     box.textContent = '요약 실패: '+error.message;
   }
@@ -416,7 +422,7 @@ async function refineTranscript(){
       renderTx('');
       showToast('✨ AI 교정이 완료됐어요');
     } else {
-      showToast('교정에 실패했어요. 서버 설정을 확인해 주세요');
+      showToast('교정에 실패했어요. OpenAI API 키를 확인해 주세요');
     }
   } catch(error) {
     showErr('교정 실패: '+error.message);

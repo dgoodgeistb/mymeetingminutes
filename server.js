@@ -6,6 +6,7 @@ import { timingSafeEqual } from 'node:crypto';
 const assets = new Map([
   ['/', ['index.html','text/html; charset=utf-8']],
   ['/index.html',['index.html','text/html; charset=utf-8']],
+  ['/public/openai-client.js',['public/openai-client.js','text/javascript; charset=utf-8']],
   ['/public/app.js',['public/app.js','text/javascript; charset=utf-8']],
   ['/public/audio.js',['public/audio.js','text/javascript; charset=utf-8']],
   ['/public/pcm-worklet.js',['public/pcm-worklet.js','text/javascript; charset=utf-8']]
@@ -29,8 +30,8 @@ export function createApp({env=process.env,fetchImpl=fetch}={}) {
     res.setHeader('Referrer-Policy','same-origin');
     res.setHeader('X-Frame-Options','DENY');
     res.setHeader('Permissions-Policy','microphone=(self)');
-    // Existing HTML uses inline click handlers/styles. Scripts and connections otherwise stay on this origin.
-    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; media-src 'self' blob:; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+    // Existing HTML uses inline handlers/styles. Direct API calls are restricted to OpenAI.
+    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.openai.com; media-src 'self' blob:; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     let counted=false;
     try {
       const url=new URL(req.url,'http://localhost');

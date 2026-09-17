@@ -47,7 +47,11 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
 .error-msg{font-size:13px;color:var(--danger);margin-top:10px;text-align:center;}
 .wc{font-size:11px;color:var(--muted);font-weight:400;}
 .api-key-row{display:flex;gap:8px;margin-bottom:4px;align-items:center;}
-.api-input{flex:1;padding:7px 10px;border-radius:8px;border:1.5px solid var(--border);font-size:13px;outline:none;font-family:monospace;}
+.api-input{flex:1;min-width:0;max-width:100%;padding:7px 10px;border-radius:8px;border:1.5px solid var(--border);font-size:13px;outline:none;font-family:monospace;}
+#settingsView label{display:block;margin:14px 0 6px;font-size:13px;}
+#micDevice,#terms{display:block;width:100%;}
+#terms{min-height:70px;}
+#apiKeyStatus{font-size:12px;margin:10px 0;color:var(--muted);}
 .api-input:focus{border-color:var(--primary);}
 .api-hint{font-size:11px;color:var(--muted);}
 .divider{width:1px;height:16px;background:var(--border);margin:0 2px;}
@@ -130,13 +134,13 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
         <span id="statusText">녹음 시작</span>
       </div>
     </div>
-    <p id="serverNotice" class="api-hint" role="status" hidden></p>
+    <p id="apiNotice" class="api-hint" role="status" hidden></p>
     <div id="errorMsg" class="error-msg" style="display:none;"></div>
   </div>
 
   <div class="card">
     <div class="card-title">
-      <span>서버 전사 내용</span>
+      <span>전사 내용</span>
       <span class="wc" id="wc"></span>
     </div>
     <div class="transcript-box empty" id="transcriptBox">녹음된 음성이 약 30초마다 전사됩니다. 종료 시 마지막 구간도 처리합니다.</div>
@@ -191,12 +195,23 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
     <p class="subtitle">마이크와 전사 설정</p>
   </header>
   <div class="card">
+    <label for="apiKey">OpenAI API 키 (전사·AI 요약·교정)</label>
+    <div class="api-key-row">
+      <input class="api-input" type="password" id="apiKey" placeholder="sk-..." autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="keyHint" />
+      <button class="btn btn-ghost" id="toggleKeyBtn" onclick="toggleApiVis()" aria-pressed="false">보기</button>
+    </div>
+    <div class="action-row">
+      <button class="btn btn-primary" id="applyKeyBtn" onclick="applyApiKey()">이 탭에서 사용</button>
+      <button class="btn btn-ghost" id="clearKeyBtn" onclick="clearApiKey()">키 삭제</button>
+    </div>
+    <p class="api-hint" id="keyHint">키는 이 페이지의 메모리에만 보관하며 새로고침·페이지 이동 시 삭제됩니다. 서버와 브라우저 저장소에는 저장하지 않습니다. 사용 중에는 페이지 코드나 확장 프로그램이 키에 접근할 수 있습니다.</p>
+    <p id="apiKeyStatus" role="status" aria-live="polite">키를 입력해 주세요.</p>
     <label for="micDevice">마이크</label>
     <select class="api-input" id="micDevice" onchange="changeMic()"><option value="">기본 마이크</option></select>
     <label for="terms">회의 전문용어 · 이름 (선택)</label>
     <textarea class="api-input" id="terms" maxlength="1000" placeholder="회사명, 제품명, 참석자 이름"></textarea>
-    <p class="api-hint">녹음한 음성은 전사를 위해 서버와 OpenAI로 전송됩니다. API 키는 서버에서만 설정합니다. 보관함은 현재 브라우저에 저장됩니다.</p>
-    <p id="serverStatus" role="status">서버 연결 확인 중…</p>
+    <p class="api-hint">입력한 키와 녹음·전사 내용은 OpenAI API로 직접 전송됩니다. 별도 전사 서버는 필요하지 않습니다. API 사용료는 입력한 키의 계정에 청구됩니다. 보관함에는 녹음과 전사만 저장됩니다.</p>
+
   </div>
 </div>
 
@@ -234,6 +249,7 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
 <div class="toast" id="toast"></div>
 
 <script src="./public/audio.js"></script>
+<script src="./public/openai-client.js"></script>
 <script src="./public/app.js"></script>
 </body>
 </html>
