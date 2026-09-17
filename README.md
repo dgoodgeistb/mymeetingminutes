@@ -54,9 +54,10 @@ npm test
 ```sh
 npm install --no-save --package-lock=false playwright
 npm run test:browser
+npm run test:pages
 ```
 
-설치된 Chrome과 가상 마이크, 테스트 API를 사용합니다. `BROWSER_EXECUTABLE`로 브라우저 경로를 지정할 수 있습니다. 실제 마이크·실제 API 품질을 측정하는 테스트는 아닙니다.
+설치된 Chrome과 가상 마이크, 테스트 API를 사용합니다. `test:pages`는 `/mymeetingminutes/` 하위의 정적 사이트에서 언어 버튼·마이크 준비·녹음과 서버 부재 안내를 검증합니다. `BROWSER_EXECUTABLE`로 브라우저 경로를 지정할 수 있습니다. 실제 마이크·실제 API 품질을 측정하는 테스트는 아닙니다.
 
 ## 제한과 실제 환경 확인
 
