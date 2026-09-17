@@ -23,7 +23,7 @@ class MeetingCapture {
         deviceId:deviceId ? {exact:deviceId} : undefined,
         channelCount:{ideal:1}, noiseSuppression:true, autoGainControl:true, echoCancellation:true
       }});
-      await this.context.audioWorklet.addModule('/public/pcm-worklet.js');
+      await this.context.audioWorklet.addModule(new URL('./public/pcm-worklet.js', document.baseURI).href);
       this.source = this.context.createMediaStreamSource(this.stream);
       this.analyser = this.context.createAnalyser(); this.analyser.fftSize=512;
       this.node = new AudioWorkletNode(this.context,'meeting-pcm');

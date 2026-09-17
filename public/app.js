@@ -91,9 +91,8 @@ async function processQueue() {
         const form=new FormData(); form.append('file',job.blob,job.name||'meeting.wav');
         form.append('language',job.language);
         form.append('prompt',[job.terms,fullTx().slice(-800)].filter(Boolean).join('\n'));
-        const res=await fetch('/api/transcribe',{method:'POST',body:form,signal:requestController.signal});
-        const data=await res.json();
-        if(!res.ok) throw new Error(data.error || '전사 요청 실패');
+        const res=await fetch('./api/transcribe',{method:'POST',body:form,signal:requestController.signal});
+        const data=await readApiResponse(res);
         if(typeof data.text!=='string') throw new Error('전사 응답을 확인할 수 없습니다.');
         if(token!==generation) return;
         if(data.text.trim()) committedTx += data.text.trim()+'\n';
@@ -135,9 +134,20 @@ document.addEventListener('visibilitychange',()=>{
 });
 window.addEventListener('beforeunload',e=>{if(sessionBusy()){e.preventDefault();e.returnValue='';}});
 window.addEventListener('pagehide',()=>{void capture.release();});
-fetch('/api/health').then(r=>{if(!r.ok)throw new Error();return r.json();}).then(d=>{
+const backendHelp='전사 서버에 연결할 수 없습니다. 녹음·저장은 가능하지만 전사·AI 요약은 서버 주소에서 이용해 주세요. GitHub Pages만으로는 전사 서버가 실행되지 않습니다.';
+async function readApiResponse(res) {
+  if(res.status===404 || !(res.headers.get('content-type')||'').includes('application/json')) throw new Error(backendHelp);
+  const data=await res.json();
+  if(!res.ok) throw new Error(data.error || '서버 요청에 실패했습니다.');
+  return data;
+}
+fetch('./api/health').then(readApiResponse).then(d=>{
   $('serverStatus').textContent=d.configured?'서버 연결됨':'서버에 OPENAI_API_KEY 설정이 필요합니다.';
-}).catch(()=>{$('serverStatus').textContent='서버에 연결할 수 없습니다. Node 서버 주소로 접속해 주세요.';});
+}).catch(()=>{
+  $('serverStatus').textContent=backendHelp;
+  $('serverNotice').textContent=backendHelp;
+  $('serverNotice').hidden=false;
+});
 function saveAudio() {
   if (audioBlob) { _downloadAudio(); return; }
   if (recording)  { showToast('녹음 종료 후 저장할 수 있어요'); return; }
@@ -355,10 +365,9 @@ function saveText() {
 // 서버 AI API 공통 호출
 // ─────────────────────────────────────────
 async function callAI(action, text) {
-  const res = await fetch('/api/ai', {method:'POST', headers:{'Content-Type':'application/json'},
+  const res = await fetch('./api/ai', {method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action, text}), signal:AbortSignal.timeout(120000)});
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'AI 요청 실패');
+  const data = await readApiResponse(res);
   return data.text;
 }
 
