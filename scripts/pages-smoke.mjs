@@ -58,7 +58,7 @@ try{
   await page.waitForTimeout(500);await page.click('#recordBtn');
   await page.waitForFunction(()=>!stopping && queueFailed);
   assert.equal(await page.locator('#saveAudioBtn').isEnabled(),true);
-  assert.match(await page.locator('#errorMsg').innerText(),/키를 입력/);assert.equal(apiCalls,0);
+  assert.match(await page.locator('#transcribeStatus').innerText(),/키 입력/);assert.equal(apiCalls,0);
   await page.setViewportSize({width:390,height:844});
   await page.evaluate(()=>openSettings());
   await page.fill('#apiKey','sk-test-user-key');await page.click('#toggleKeyBtn');

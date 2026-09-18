@@ -145,6 +145,7 @@ h1{font-size:20px;font-weight:700;letter-spacing:-.4px;display:flex;align-items:
     </div>
     <div class="transcript-box empty" id="transcriptBox">녹음된 음성이 약 30초마다 전사됩니다. 종료 시 마지막 구간도 처리합니다.</div>
     <p id="transcribeStatus" role="status" aria-live="polite"></p>
+    <p id="quotaHelp" class="api-hint" hidden>API 잔액·사용 한도는 <a href="https://platform.openai.com/" target="_blank" rel="noopener noreferrer">OpenAI API 관리 화면</a>에서 확인하세요. 처리되지 않은 음성을 보존하려면 이 탭을 닫지 말고 녹음을 저장하세요.</p>
     <button class="btn btn-ghost" id="retryBtn" onclick="retryTranscription()" hidden>전사 재시도</button>
     <div class="action-row">
       <button class="btn btn-primary" id="summarizeBtn" onclick="summarize()" disabled>

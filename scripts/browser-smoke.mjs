@@ -13,7 +13,7 @@ try {
  await page.route('https://api.openai.com/v1/**',async route=>{
   assert.equal(route.request().headers().authorization,'Bearer sk-test-user-key');
   if(route.request().url().endsWith('/audio/transcriptions')) {
-   if(failNext){failNext=false;return route.fulfill({status:429,json:{error:{message:'rate limited'}}});}
+   if(failNext){failNext=false;return route.fulfill({status:429,headers:{'Retry-After':'1','Access-Control-Expose-Headers':'Retry-After'},json:{error:{code:'rate_limit_exceeded'}}});}
    transcriptions++;assert.ok(route.request().postDataBuffer().length>44);
    return route.fulfill({json:{text:`회의 구간 ${transcriptions}`}});
   }
