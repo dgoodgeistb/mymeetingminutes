@@ -56,3 +56,27 @@ test('a new page instance starts without a key and invalid input never sends a r
  await assert.rejects(first.ai('summarize',''),/1~100,000/);
  await assert.rejects(first.transcribe({...audio,blob:new Blob([])}),/0바이트/);
 });
+test('quota exhaustion differs from temporary rate limits without exposing provider messages',async()=>{
+ let code='insufficient_quota';
+ const api=client(async()=>Response.json({error:{code,message:'private sk-test-user-key'}},{status:429,headers:{'Retry-After':'3'}}));
+ api.setKey('sk-test-user-key');
+ await assert.rejects(api.transcribe(audio),e=>e.code==='insufficient_quota'&&e.retryAfterMs===null&&/재시도만 해서는/.test(e.message)&&!e.message.includes('sk-test'));
+ code='rate_limit_exceeded';await assert.rejects(api.transcribe(audio),e=>e.code==='rate_limit_exceeded'&&e.retryAfterMs===3000&&e.status===429);
+});
+test('rate-limit parsing tolerates hidden headers and malformed error bodies',async()=>{
+ let response=new Response('not json',{status:429});
+ const api=client(async()=>response);api.setKey('sk-test-user-key');
+ await assert.rejects(api.transcribe(audio),e=>e.code==='unknown_429'&&e.retryAfterMs===null);
+ response=Response.json({error:{type:'insufficient_quota'}},{status:429});
+ await assert.rejects(api.transcribe(audio),e=>e.code==='insufficient_quota');
+ response=Response.json({error:{code:'rate_limit_exceeded'}},{status:429,headers:{'Retry-After':new Date(Date.now()+60000).toUTCString()}});
+ await assert.rejects(api.transcribe(audio),e=>e.retryAfterMs>50000&&e.retryAfterMs<=60000);
+});
+test('billing limits and slow-down codes are classified without guessing from raw messages',async()=>{
+ let code='credit_balance_exhausted';
+ const api=client(async()=>Response.json({error:{code}},{status:429}));api.setKey('sk-test-user-key');
+ for(code of ['credit_balance_exhausted','organization_spend_limit_exceeded','project_spend_limit_exceeded','organization_usage_limit_exceeded']) {
+  await assert.rejects(api.transcribe(audio),e=>e.code==='insufficient_quota'&&e.retryAfterMs===null);
+ }
+ code='slow_down';await assert.rejects(api.transcribe(audio),e=>e.code==='rate_limit_exceeded');
+});

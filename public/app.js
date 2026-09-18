@@ -1,11 +1,13 @@
-let recording=false, starting=false, stopping=false, preparing=false, aiBusy=false, importing=false;
+let recording=false, starting=false, stopping=false, preparing=false, aiBusy=false, importing=false, archiving=false;
 let currentLang='ko-KR', committedTx='', sessionFinal='', hasInterim=false, animId=null;
 let audioBlob=null, audioChunks=[], elapsedTimer=null, recStartTs=0, wakeLock=null;
 let queue=[], queueRunning=false, queueFailed=false, generation=0, requestController=null;
+let queueError=null, retryAvailableAt=0, retryUITimer=null;
 let sessionRate=48000, sessionLang='ko', sessionTerms='', idleTimer=null, sampleCount=0;
 const $ = id => document.getElementById(id);
 const fullTx = () => (committedTx + sessionFinal).trim();
-const sessionBusy = () => recording || starting || stopping || preparing || aiBusy || importing || queue.length>0 || queueRunning;
+const activeWork = () => recording || starting || stopping || preparing || aiBusy || importing || archiving || queueRunning;
+const sessionBusy = () => activeWork() || queue.length>0;
 const openaiClient = new MeetingOpenAI();
 const capture = new MeetingCapture(onAudioChunk, message => {
   showErr(message);
@@ -38,16 +40,16 @@ async function releasePreparedMic() {
   try {clearTimeout(idleTimer); await capture.release(); $('micStatus').textContent='마이크 꺼짐';}
   finally {preparing=false;}
 }
-async function changeMic() { if(sessionBusy()) return; await releasePreparedMic(); }
+async function changeMic() { if(activeWork()) return; await releasePreparedMic(); }
 async function toggleRecord() { if(starting||stopping||preparing) return; recording ? await stopRec() : await startRec(); }
 async function startRec() {
-  if(sessionBusy()) {showToast('진행 중인 작업과 전사를 먼저 마쳐 주세요');return;}
-  if ((audioBlob || fullTx()) && !confirm('새 회의를 시작하면 현재 화면의 내용이 바뀝니다. 필요한 내용은 저장하셨나요?')) return;
+  if(activeWork()) {showToast('진행 중인 작업을 먼저 마쳐 주세요');return;}
+  if ((audioBlob || fullTx() || queue.length) && !confirm('새 회의를 시작하면 현재 녹음과 미완료 전사가 바뀝니다. 필요한 내용은 보관함에 저장하셨나요?')) return;
   starting=true; $('recordBtn').disabled=true; $('statusText').textContent='녹음 준비 중…';
   try {
     await prepareCapture(); clearTimeout(idleTimer);
     $('transcribeFileBtn').hidden=true;
-    generation++; committedTx=''; sessionFinal=''; audioBlob=null; audioChunks=[]; sampleCount=0;
+    resetPendingQueue(); committedTx=''; sessionFinal=''; audioBlob=null; audioChunks=[]; sampleCount=0;
     sessionLang=currentLang.split('-')[0]; sessionTerms=[currentLang==='zh-TW'?'請使用繁體中文。':currentLang==='zh-CN'?'请使用简体中文。':'', $('terms').value.trim()].filter(Boolean).join(' '); sessionRate=capture.context.sampleRate;
     $('summaryCard').style.display='none'; $('summaryBox').textContent='';
     await capture.start();
@@ -83,10 +85,15 @@ function onAudioChunk({pcm,sampleRate}) {
 }
 async function processQueue() {
   if(queueRunning || queueFailed || !queue.length) return;
+  if(!openaiClient.hasKey()) {
+    queueFailed=true;queueError={code:'missing_key'};updateQueueUI();return;
+  }
   queueRunning=true; const token=generation;
+  queueError=null; retryAvailableAt=0; $('errorMsg').style.display='none';
   try {
     while(queue.length && token===generation) {
-      const job=queue[0]; requestController=new AbortController();
+      const job=queue[0]; job.attempts=(job.attempts||0)+1;
+      requestController=new AbortController(); updateQueueUI();
       const timer=setTimeout(()=>requestController?.abort(),120000);
       try {
         const text=await openaiClient.transcribe({blob:job.blob,name:job.name||'meeting.wav',language:job.language,
@@ -96,7 +103,14 @@ async function processQueue() {
         queue.shift(); renderTx('');
       } catch(error) {
         if(token!==generation) return;
-        queueFailed=true; showErr('전사가 멈췄습니다. 녹음은 보존됩니다. '+(error.name==='AbortError'?'요청 시간 초과':error.message)); break;
+        queueFailed=true; queueError=error;
+        if(['rate_limit_exceeded','unknown_429'].includes(error.code)) {
+          // No automatic uploads: respect provider delay, otherwise back off between manual attempts.
+          const delay=error.retryAfterMs ?? Math.min(300000,30000*2**Math.min(job.attempts-1,4));
+          retryAvailableAt=Date.now()+delay;
+        }
+        const reason=error.name==='AbortError'?'요청이 취소되었거나 시간이 초과됐습니다. 키와 연결을 확인하고 다시 시도해 주세요.':error.message;
+        showErr('전사가 멈췄습니다. 미완료 음성은 이 탭에 보존됩니다. '+reason); break;
       } finally {clearTimeout(timer);}
       updateQueueUI();
     }
@@ -110,14 +124,29 @@ function transcribeImported() {
   queue.push({blob:audioBlob,name,language:currentLang.split('-')[0],terms:$('terms').value.trim()});
   $('transcribeFileBtn').hidden=true; updateQueueUI();void processQueue();
 }
-function retryTranscription() {queueFailed=false; $('errorMsg').style.display='none';void processQueue();}
+function retryTranscription() {
+  if(queueRunning) {showToast('전사 요청을 처리 중입니다');return;}
+  if(!queue.length) {showToast('재시도할 미완료 음성이 없습니다');return;}
+  if(!openaiClient.hasKey()) {showToast('OpenAI API 키를 입력한 뒤 재시도해 주세요');openSettings();return;}
+  if(Date.now()<retryAvailableAt) {updateQueueUI();return;}
+  queueFailed=false;
+  return processQueue();
+}
 function updateQueueUI() {
-  $('transcribeStatus').textContent=queue.length ? `${queueFailed?'재시도 필요':'전사 처리 중'} · 남은 구간 ${queue.length}개` : recording?'다음 30초 구간을 녹음 중…':fullTx()?'전사 완료':'';
-  $('retryBtn').hidden=!queueFailed;
+  clearTimeout(retryUITimer);retryUITimer=null;
+  const seconds=Math.max(0,Math.ceil((retryAvailableAt-Date.now())/1000));
+  const status=$('transcribeStatus'), button=$('retryBtn');
+  status.setAttribute('aria-busy',String(queueRunning));
+  status.textContent=queue.length ? `${queueRunning?'전사 요청 중 · 시도 '+(queue[0].attempts||1):seconds?'요청 제한 · '+seconds+'초 후 재시도 가능':queueFailed?(queueError?.code==='missing_key'?(recording?'녹음 계속 중 · 키 입력 후 전사 가능':'키 입력 후 전사 가능'):'전사 중단 · 확인 후 재시도'):'전사 대기'} · 남은 구간 ${queue.length}개` : recording?'다음 30초 구간을 녹음 중…':fullTx()?'전사 완료':'';
+  button.hidden=!queue.length || (!queueFailed && !queueRunning);
+  button.disabled=queueRunning || seconds>0;
+  button.textContent=queueRunning?'전사 요청 중…':seconds?`${seconds}초 후 재시도`:queueError?.code==='insufficient_quota'?'결제·한도 확인 후 재시도':'전사 재시도';
+  $('quotaHelp').hidden=!queueFailed || !['insufficient_quota','unknown_429'].includes(queueError?.code);
+  if(queueFailed && seconds>0) retryUITimer=setTimeout(updateQueueUI,1000);
   updateArchiveBtn();
 }
 function setLang(lang,btn) {
-  if(sessionBusy()) {showToast('진행 중인 작업을 먼저 마쳐 주세요');return;}
+  if(activeWork()) {showToast('진행 중인 작업을 먼저 마쳐 주세요');return;}
   currentLang=lang; document.querySelectorAll('.lang-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
 }
 async function acquireWakeLock(){try{if('wakeLock' in navigator){const lock=await navigator.wakeLock.request('screen');if(recording)wakeLock=lock;else await lock.release();}}catch{}}
@@ -143,6 +172,7 @@ function applyApiKey() {
     openaiClient.setKey($('apiKey').value);
     $('apiKey').value=''; $('apiKey').type='password';
     $('toggleKeyBtn').textContent='보기'; $('toggleKeyBtn').setAttribute('aria-pressed','false');
+    retryAvailableAt=0;queueError=null;updateQueueUI();
     updateKeyStatus(); showToast('이 탭에서 키를 사용합니다. 미완료 전사는 재시도해 주세요.');
   } catch(error) {showToast(error.message);}
 }
@@ -172,11 +202,12 @@ function handleFileLoad(e){
   const file = e.target.files && e.target.files[0];
   e.target.value = '';
   if (!file) return;
-  if (sessionBusy()) { showToast('진행 중인 작업을 먼저 마쳐 주세요'); return; }
+  if (activeWork()) { showToast('진행 중인 작업을 먼저 마쳐 주세요'); return; }
 
   const isAudio = file.type.startsWith('audio/') || /\.(webm|ogg|mp4|m4a|mp3|wav|aac|flac)$/i.test(file.name);
   const isText  = file.type.startsWith('text/')  || /\.txt$/i.test(file.name);
 
+  if ((isAudio || isText) && !replacePendingAllowed()) return;
   if (isAudio) {
     committedTx=''; sessionFinal=''; renderTx('');
     $('summaryCard').style.display='none'; $('summaryBox').textContent='';
@@ -205,7 +236,7 @@ function handleFileLoad(e){
       showToast('전사 파일을 불러왔어요');
     };
     reader.onerror = () => showToast('파일을 읽을 수 없어요');
-    reader.onloadend = () => {importing=false;};
+    reader.onloadend = () => {importing=false;updateArchiveBtn();};
     reader.readAsText(file);
   } else {
     showToast('지원하지 않는 파일 형식이에요 (.txt 또는 오디오 파일)');
@@ -274,7 +305,7 @@ function setRecordingUI() {
 function setStoppedUI() {
   document.getElementById('recordBtn').classList.remove('recording');
   document.getElementById('statusBadge').classList.remove('recording');
-  document.getElementById('statusText').textContent = fullTx() ? '녹음 완료' : '녹음 시작';
+  document.getElementById('statusText').textContent = (audioBlob || fullTx()) ? '녹음 완료' : '녹음 시작';
   document.getElementById('micIcon').innerHTML =
     '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>' +
     '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>' +
@@ -382,7 +413,8 @@ async function callAI(action, text) {
 // ─────────────────────────────────────────
 async function summarize() {
   const text = fullTx(); if (!text) return;
-  if (sessionBusy()) { showToast('녹음과 전사가 끝난 뒤 실행해 주세요'); return; }
+  if(!openaiClient.hasKey()) {showToast('AI 기능에는 OpenAI API 키가 필요합니다');openSettings();return;}
+  if (sessionBusy()) { showToast('미완료 전사를 먼저 처리해 주세요. 녹음 저장과 보관함 저장은 가능합니다.'); return; }
   aiBusy = true;
   const card = document.getElementById('summaryCard');
   const box  = document.getElementById('summaryBox');
@@ -405,7 +437,8 @@ async function summarize() {
 async function refineTranscript(){
   if (recording) { showToast('녹음 종료 후 교정할 수 있어요'); return; }
   const text = fullTx(); if (!text) return;
-  if (sessionBusy()) { showToast('녹음과 전사가 끝난 뒤 실행해 주세요'); return; }
+  if(!openaiClient.hasKey()) {showToast('AI 기능에는 OpenAI API 키가 필요합니다');openSettings();return;}
+  if (sessionBusy()) { showToast('미완료 전사를 먼저 처리해 주세요. 녹음 저장과 보관함 저장은 가능합니다.'); return; }
 
   aiBusy = true;
   const btn = document.getElementById('refineBtn');
@@ -427,7 +460,7 @@ async function refineTranscript(){
   } catch(error) {
     showErr('교정 실패: '+error.message);
   }
-  aiBusy = false;
+  aiBusy = false; updateArchiveBtn();
   btn.textContent = original;
   btn.disabled = !fullTx();
 }
@@ -435,12 +468,19 @@ async function refineTranscript(){
 // ─────────────────────────────────────────
 // 초기화
 // ─────────────────────────────────────────
+function resetPendingQueue() {
+  generation++;requestController?.abort();queue=[];queueFailed=false;queueError=null;retryAvailableAt=0;
+  clearTimeout(retryUITimer);retryUITimer=null;
+}
+function replacePendingAllowed() {
+  if(queue.length && !confirm('현재 미완료 전사를 바꾸시겠어요? 필요한 내용은 먼저 보관함에 저장하세요.')) return false;
+  resetPendingQueue();updateQueueUI();return true;
+}
 function clearAll() {
-  if (recording || starting || stopping || preparing || importing || aiBusy) { showToast('진행 중인 작업을 먼저 종료해 주세요'); return; }
+  if (recording || starting || stopping || preparing || importing || aiBusy || archiving) { showToast('진행 중인 작업을 먼저 종료해 주세요'); return; }
   if (queue.length && !confirm('미완료 전사를 버리고 초기화할까요? 먼저 녹음을 저장할 수 있습니다.')) return;
   $('transcribeFileBtn').hidden=true;
-  generation++;
-  requestController?.abort(); queue=[]; queueFailed=false;
+  resetPendingQueue();
   committedTx=''; sessionFinal=''; audioBlob=null; audioChunks=[];
   releasePreparedMic();
   renderTx(''); setStoppedUI(); setAudioForPlayback(null); updateQueueUI();
@@ -526,11 +566,11 @@ function idbDelete(id){
 
 function updateArchiveBtn(){
   const btn = document.getElementById('archiveBtn');
-  if (btn) btn.disabled = !(fullTx() || audioBlob);
+  if (btn) btn.disabled = activeWork() || !(fullTx() || audioBlob);
 }
 
 async function archiveSession(){
-  if (sessionBusy()) { showToast('녹음과 전사가 끝난 뒤 저장해 주세요'); return; }
+  if (activeWork()) { showToast('녹음 또는 진행 중인 요청을 먼저 종료해 주세요'); return; }
   const text = fullTx();
   if (!text && !audioBlob) { showToast('저장할 내용이 없어요'); return; }
   const record = {
@@ -539,14 +579,16 @@ async function archiveSession(){
     transcript: text,
     words    : text ? text.split(/\s+/).filter(Boolean).length : 0,
     audio    : audioBlob || null,
-    mime     : audioBlob ? (audioBlob.type || 'audio/webm') : null
+    mime     : audioBlob ? (audioBlob.type || 'audio/webm') : null,
+    pendingTranscriptions: queue.map(({blob,name,language,terms})=>({blob,name,language,terms}))
   };
+  archiving=true;updateArchiveBtn();
   try {
     await idbAdd(record);
-    showToast('보관함에 저장됐어요');
+    showToast(record.pendingTranscriptions.length?'녹음과 미완료 전사 구간을 보관함에 저장했어요':'보관함에 저장됐어요');
   } catch {
     showToast('보관함 저장에 실패했어요');
-  }
+  } finally {archiving=false;updateArchiveBtn();}
 }
 
 // ─────────────────────────────────────────
@@ -614,6 +656,7 @@ function buildHistItem(rec){
   meta.appendChild(makeTag(langLabel(rec.lang)));
   if (rec.transcript) meta.appendChild(makeTag('📝 ' + rec.words + '단어'));
   if (rec.audio)      meta.appendChild(makeTag('🎵 녹음'));
+  if (rec.pendingTranscriptions?.length) meta.appendChild(makeTag('전사 대기 '+rec.pendingTranscriptions.length+'개'));
   left.appendChild(date); left.appendChild(meta);
   head.appendChild(left);
   item.appendChild(head);
@@ -638,10 +681,10 @@ function buildHistItem(rec){
   const actions = document.createElement('div');
   actions.className = 'hist-actions';
 
-  if (rec.transcript) {
+  if (rec.transcript || rec.audio || rec.pendingTranscriptions?.length) {
     const loadBtn = document.createElement('button');
     loadBtn.className = 'btn btn-primary';
-    loadBtn.textContent = '📄 전사 불러오기';
+    loadBtn.textContent = rec.pendingTranscriptions?.length?'📂 불러와서 전사 계속':'📂 회의 불러오기';
     loadBtn.onclick = () => loadHistorySession(rec);
     actions.appendChild(loadBtn);
   }
@@ -670,7 +713,13 @@ function makeTag(text){
 }
 
 function loadHistorySession(rec){
-  if (sessionBusy()) { showToast('진행 중인 작업을 먼저 마쳐 주세요'); return; }
+  if (activeWork()) { showToast('진행 중인 작업을 먼저 마쳐 주세요'); return; }
+  if(!replacePendingAllowed()) return;
+  queue=(rec.pendingTranscriptions||[]).map(job=>({...job}));queueFailed=queue.length>0;
+  if(queueFailed) queueError={code:openaiClient.hasKey()?'restored':'missing_key'};
+  currentLang=rec.lang || 'ko-KR';
+  const languages=['ko-KR','en-US','zh-CN','zh-TW'];
+  document.querySelectorAll('.lang-btn').forEach((btn,i)=>btn.classList.toggle('active',languages[i]===currentLang));
   $('transcribeFileBtn').hidden=true;
   committedTx  = rec.transcript ? rec.transcript.trim() + ' ' : '';
   sessionFinal = '';
@@ -680,11 +729,12 @@ function loadHistorySession(rec){
   renderTx('');
   document.getElementById('saveAudioBtn').disabled = !audioBlob;
   setAudioForPlayback(audioBlob);
-  document.getElementById('statusText').textContent = fullTx() ? '불러옴' : '녹음 시작';
+  document.getElementById('statusText').textContent = (audioBlob || fullTx()) ? '불러옴' : '녹음 시작';
   document.getElementById('summaryCard').style.display = 'none';
   document.getElementById('summaryBox').textContent = '';
+  updateQueueUI();$('errorMsg').style.display='none';
   closeHistory();
-  showToast('보관함에서 불러왔어요');
+  showToast(queue.length?'미완료 음성을 불러왔어요. 키 입력 후 전사 재시도를 누르세요.':'보관함에서 불러왔어요');
 }
 
 function downloadHistAudio(rec){

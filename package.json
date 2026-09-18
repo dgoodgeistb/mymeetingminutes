@@ -11,6 +11,8 @@
     "test": "node --test",
     "check": "node --check server.js && node --check public/app.js && node --check public/audio.js && node --check public/pcm-worklet.js && node --check public/openai-client.js",
     "test:browser": "node scripts/browser-smoke.mjs",
-    "test:pages": "node scripts/pages-smoke.mjs"
+    "test:pages": "node scripts/pages-smoke.mjs",
+    "test:retry": "node scripts/retry-smoke.mjs",
+    "test:keyless": "node scripts/keyless-smoke.mjs"
   }
 }
